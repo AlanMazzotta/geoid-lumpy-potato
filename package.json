@@ -1,0 +1,9 @@
+{
+  "name": "standalone_geoid_viewer_site",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "npx http-server -p 8000",
+    "serve": "npx http-server -p 8000"
+  }
+}

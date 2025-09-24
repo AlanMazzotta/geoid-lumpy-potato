@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Geoid "Lumpy Potato" Viewer - Interactive 3D Earth Visualization</title>
+  <meta name="description" content="Interactive 3D visualization of Earth's geoid showing gravitational variations with realistic displacement mapping and starfield.">
+  <meta name="keywords" content="geoid, earth, 3D, visualization, EGM2008, gravity, three.js, interactive">
+  <meta name="author" content="Alan Mazzotta">
+  
+  <!-- Open Graph / Social Media -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Geoid 'Lumpy Potato' Viewer">
+  <meta property="og:description" content="Interactive 3D Earth showing gravitational variations">
+  <meta property="og:image" content="assets/Signet_short.png">
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="assets/Signet_short.png">
+  <style>
+    html,body{height:100%;margin:0;background:#000}
+    #c{width:100%;height:100%;display:block}
+    #ui{position:fixed;right:12px;top:12px;background:rgba(64,64,64,0.85);color:#fff;padding:8px;border-radius:6px;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;font-size:13px;z-index:99;max-width:320px;text-align:right}
+  /* Minimized (kabob) state: show only the title row (title + kebab) */
+  #ui.small{width:44px;padding:6px;text-align:center}
+  /* hide every child except the title row when minimized so dynamically appended elements are hidden too */
+  #ui.small > :not(.title-row){ display:none !important }
+  #ui.small .controls{display:none}
+  /* Make title compact and prevent wrapping */
+  #ui.small .title-row strong { display:block; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+    #ui .title-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    #ui-kebab{width:26px;height:26px;display:inline-block;cursor:pointer;flex-shrink:0}
+    #ui-kebab:after{content:'\22EE';font-size:18px;line-height:26px;color:#ddd}
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="title-row" style="margin-bottom:8px"><strong>Geoid "Lumpy Potato"</strong><div id="ui-kebab" title="Toggle controls" aria-hidden="false"></div></div>
+  <div class="controls">
+    <div style="margin-bottom:6px">
+      <label for="ex" style="display:block;font-size:12px;margin-bottom:4px">Exaggeration</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="ex" type="range" min="-0.2" max="3" step="0.01" value="0.1" style="width:140px">
+        <span id="exv">0.10x</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><button id="daybtn">Day</button><button id="nightbtn">Night</button></div>
+    
+  </div>
+</div>
+<script type="module">
+(async ()=>{
+  const THREE = await import('https://esm.sh/three@0.152.2');
+  const OrbitMod = await import('https://esm.sh/three@0.152.2/examples/jsm/controls/OrbitControls.js');
+  const OrbitControls = OrbitMod.OrbitControls;
+  const canvas = document.getElementById('c');
+  const renderer = new THREE.WebGLRenderer({canvas,antialias:true}); renderer.setSize(window.innerWidth,window.innerHeight); renderer.setPixelRatio(window.devicePixelRatio||1);
+  // color space
+  try{ if('outputColorSpace' in renderer && 'sRGB' in THREE) renderer.outputColorSpace = THREE.SRGBColorSpace || THREE.sRGBColorSpace || renderer.outputColorSpace; else if('outputEncoding' in renderer) renderer.outputEncoding = THREE.SRGBEncoding;}catch(e){}
+  const scene = new THREE.Scene(); const camera = new THREE.PerspectiveCamera(40,window.innerWidth/window.innerHeight,0.001,20); camera.position.set(0,0,3.8);
+  const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+  scene.add(new THREE.AmbientLight(0xffffff,2.8)); const dir = new THREE.DirectionalLight(0xffffff,1.6); dir.position.set(5,4,4); scene.add(dir);
+
+  const SPHERE_SEGMENTS_LON = 256, SPHERE_SEGMENTS_LAT = 128;
+  const geo = new THREE.SphereGeometry(1, SPHERE_SEGMENTS_LON, SPHERE_SEGMENTS_LAT); geo.rotateY(Math.PI);
+  const mat = new THREE.MeshStandardMaterial({metalness:0,roughness:1});
+  const mesh = new THREE.Mesh(geo, mat); mesh.name = 'GeoidSphereClean';
+  // groups for tilt and spin (so tilt is static and spin rotates the globe)
+  const tiltGroup = new THREE.Group(); const spinGroup = new THREE.Group();
+  spinGroup.add(mesh); tiltGroup.add(spinGroup); scene.add(tiltGroup);
+
+  // overlay shader (simple day/night mix)
+  const overlayUniforms = { dayMap:{value:null}, nightMap:{value:null}, sunDirView:{value:new THREE.Vector3(1,0,0)}, terminatorWidth:{value:0.08} };
+  const overlayMat = new THREE.ShaderMaterial({ uniforms: overlayUniforms, vertexShader: 'varying vec2 vUv; varying vec3 vNormal; void main(){ vUv=uv; vNormal = normalize(normalMatrix * normal); gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }', fragmentShader: 'uniform sampler2D dayMap; uniform sampler2D nightMap; uniform vec3 sunDirView; uniform float terminatorWidth; varying vec2 vUv; varying vec3 vNormal; void main(){ vec3 d = texture(dayMap, vUv).rgb; vec3 n = texture(nightMap, vUv).rgb; float nd = dot(normalize(vNormal), normalize(sunDirView)); float b=0.02; float f = smoothstep(-terminatorWidth, terminatorWidth, clamp(nd+b,-1.0,1.0)); vec3 c = mix(n,d,pow(f,0.95)); gl_FragColor = vec4(c,1.0); }', transparent:false, depthTest:false, depthWrite:false });
+  const overlayMesh = new THREE.Mesh(geo, overlayMat); overlayMesh.renderOrder = 500; overlayMesh.name='DayNightOverlayClean'; spinGroup.add(overlayMesh);
+
+  // Create graticule textures (major and minor) and attach as meshes that share the globe geometry
+  function makeGraticuleTexture(intervalDeg = 10, lineWidth = 1, color = 'rgba(255,255,255,0.6)', equatorColor = null) {
+    const w = 2048, h = 1024; const c = document.createElement('canvas'); c.width = w; c.height = h; const ctx = c.getContext('2d'); ctx.clearRect(0,0,w,h);
+    // draw longitude lines
+    ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
+    for (let lon = -180; lon <= 180; lon += intervalDeg) { const x = Math.round((lon + 180) / 360 * w); ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
+    // draw latitude lines; draw equator specially if equatorColor provided
+    for (let lat = -90; lat <= 90; lat += intervalDeg) {
+      const y = Math.round((90 - lat) / 180 * h);
+      ctx.beginPath();
+      if (equatorColor !== null && lat === 0) {
+        ctx.strokeStyle = equatorColor; ctx.lineWidth = Math.max(1, lineWidth * 1.6);
+      } else {
+        ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
+      }
+      ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+    }
+    return new THREE.CanvasTexture(c);
+  }
+  // major graticule (10deg) - draw equator in yellow to highlight it
+  const grTexMajor = makeGraticuleTexture(10, 1, 'rgba(255,255,255,0.7)', 'rgba(255,214,128,0.8)'); grTexMajor.needsUpdate = true; if('wrapS' in grTexMajor) grTexMajor.wrapS = THREE.RepeatWrapping; if('wrapT' in grTexMajor) grTexMajor.wrapT = THREE.ClampToEdgeWrapping;
+  const grMaterialMajor = new THREE.MeshBasicMaterial({ map: grTexMajor, transparent: true, depthWrite: false, depthTest: false, opacity: 0.85, side: THREE.FrontSide });
+  const grMeshMajor = new THREE.Mesh(geo, grMaterialMajor); grMeshMajor.name = 'GraticuleMajor'; grMeshMajor.renderOrder = 900; grMeshMajor.visible = true; spinGroup.add(grMeshMajor);
+  // minor graticule (1deg)
+  const grTexMinor = makeGraticuleTexture(1, 1, 'rgba(255,255,255,0.12)'); grTexMinor.needsUpdate = true; if('wrapS' in grTexMinor) grTexMinor.wrapS = THREE.RepeatWrapping; if('wrapT' in grTexMinor) grTexMinor.wrapT = THREE.ClampToEdgeWrapping;
+  const grMaterialMinor = new THREE.MeshBasicMaterial({ map: grTexMinor, transparent: true, depthWrite: false, depthTest: false, opacity: 0.5, side: THREE.FrontSide });
+  const grMeshMinor = new THREE.Mesh(geo, grMaterialMinor); grMeshMinor.name = 'GraticuleMinor'; grMeshMinor.renderOrder = 901; grMeshMinor.visible = false; spinGroup.add(grMeshMinor);
+
+  // --- Starfield (Points) - final implementation from main viewer ---
+  const starGroup = new THREE.Group();
+  function makeStarSprite(sz = 24) {
+    const c2 = document.createElement('canvas'); c2.width = sz; c2.height = sz;
+    const cx = sz / 2, cy = sz / 2, cr = sz / 2;
+    const ctx2 = c2.getContext('2d'); ctx2.clearRect(0,0,sz,sz);
+    const grd = ctx2.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    grd.addColorStop(0.0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.2, 'rgba(255,255,255,0.9)');
+    grd.addColorStop(0.5, 'rgba(255,255,255,0.35)');
+    grd.addColorStop(1.0, 'rgba(255,255,255,0)');
+    ctx2.fillStyle = grd; ctx2.beginPath(); ctx2.arc(cx, cy, cr, 0, Math.PI * 2); ctx2.fill();
+    const t2 = new THREE.CanvasTexture(c2); t2.needsUpdate = true; try { t2.minFilter = THREE.LinearMipMapLinearFilter; t2.magFilter = THREE.LinearFilter; } catch(e) {}
+    return t2;
+  }
+  const starSprite = makeStarSprite(24);
+  const STAR_COUNT = 3600;
+  const starRadius = Math.max(12, (camera && camera.far) ? camera.far * 0.9 : 18);
+  const positions = new Float32Array(STAR_COUNT * 3);
+  // Galactic plane tilt - 12 degrees off east-west orientation
+  const galacticTilt = THREE.MathUtils.degToRad(12);
+  const cosTilt = Math.cos(galacticTilt);
+  const sinTilt = Math.sin(galacticTilt);
+  
+  for (let i = 0; i < STAR_COUNT; i++) {
+    // Create Milky Way band effect - 40% in galactic band, 60% background (2x density outside)
+    const isMilkyWayBand = Math.random() < 0.4;
+    let x, y, z;
+    
+    if (isMilkyWayBand) {
+      // Milky Way band - concentrated in tilted X-Z plane
+      const bandThickness = 0.3; // Controls thickness of the galactic band
+      const localY = (Math.random() - 0.5) * bandThickness; // Local galactic plane coordinate
+      const theta = Math.random() * Math.PI * 2.0;
+      const r = Math.sqrt(Math.max(0, 1 - localY * localY));
+      const localX = r * Math.cos(theta);
+      const localZ = r * Math.sin(theta);
+      
+      // Apply 12-degree tilt rotation around Z-axis
+      x = localX * cosTilt - localY * sinTilt;
+      y = localX * sinTilt + localY * cosTilt;
+      z = localZ;
+    } else {
+      // Background stars - distributed across entire sphere
+      z = 2.0 * Math.random() - 1.0;
+      const theta = Math.random() * Math.PI * 2.0;
+      const r = Math.sqrt(Math.max(0, 1 - z * z));
+      x = r * Math.cos(theta);
+      y = r * Math.sin(theta);
+    }
+    
+    const rr = starRadius * (0.98 + Math.random() * 0.04);
+    positions[i * 3 + 0] = x * rr; positions[i * 3 + 1] = y * rr; positions[i * 3 + 2] = z * rr;
+  }
+  const starGeom = new THREE.BufferGeometry(); starGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const starMat = new THREE.PointsMaterial({ map: starSprite, color: 0xffffff, size: 1.5, sizeAttenuation: false, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending });
+  starMat.alphaTest = 0.01;
+  const starPoints = new THREE.Points(starGeom, starMat); starPoints.name = 'StarPoints'; starPoints.frustumCulled = false; starGroup.add(starPoints);
+  starGroup.visible = true; scene.add(starGroup);
+  console.log('Points starfield created: count=', STAR_COUNT, 'radius=', starRadius, 'camera.far=', camera && camera.far);
+  let starRotationSpeed = 0.002;
+  window.setStarSpeed = function(v){ starRotationSpeed = Number(v) || 0.0; console.log('starRotationSpeed=', starRotationSpeed); };
+  window.setStarCount = function(n){
+    try {
+      const count = Math.max(64, Math.floor(n) || STAR_COUNT);
+      while (starGroup.children.length) starGroup.remove(starGroup.children[0]);
+      const positions = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        const z = 2.0 * Math.random() - 1.0;
+        const theta = Math.random() * Math.PI * 2.0;
+        const r = Math.sqrt(Math.max(0, 1 - z * z));
+        const x = r * Math.cos(theta), y = r * Math.sin(theta);
+        const rr = starRadius * (0.98 + Math.random() * 0.04);
+        positions[i*3+0] = x*rr; positions[i*3+1] = y*rr; positions[i*3+2] = z*rr;
+      }
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.PointsMaterial({ map: starSprite, color: 0xffffff, size: 0.135, sizeAttenuation: false, transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending });
+      const pts = new THREE.Points(geom, mat);
+      starGroup.add(pts);
+      console.log('setStarCount ->', count);
+    } catch(e){ console.warn('setStarCount failed', e); }
+  };
+
+  // loaders and textures
+  const loader = new THREE.TextureLoader(); loader.setCrossOrigin('anonymous');
+  const DAY = 'assets/earth_blue_marble_unpkg.jpg';
+  const NIGHT = 'assets/earth_night_unpkg.jpg';
+  let dayTex=null, nightTex=null;
+  function norm(t){ try{ t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.ClampToEdgeWrapping; if(t.repeat) t.repeat.set(1,1); if(t.offset) t.offset.set(0,0); if('colorSpace' in t) t.colorSpace = THREE.SRGBColorSpace || THREE.sRGBColorSpace; else t.encoding = THREE.SRGBEncoding; t.needsUpdate=true;}catch(e){} return t; }
+  loader.load(DAY, t=>{ dayTex = norm(t); window.dayTex = dayTex; overlayUniforms.dayMap.value = dayTex; overlayUniforms.dayMap.needsUpdate=true; console.log('day loaded', dayTex.image && dayTex.image.width+'x'+dayTex.image.height); applyDay(); }, undefined, e=>console.warn('day load failed',e));
+  loader.load(NIGHT, t=>{ nightTex = norm(t); window.nightTex = nightTex; overlayUniforms.nightMap.value = nightTex; overlayUniforms.nightMap.needsUpdate=true; console.log('night loaded', nightTex.image && nightTex.image.width+'x'+nightTex.image.height); applyNight(); }, undefined, e=>console.warn('night load failed',e));
+
+  function applyDay(){ if(dayTex){ mat.map = dayTex; mat.needsUpdate=true; overlayMesh.visible = false; console.log('Applied day map'); }}
+  function applyNight(){ if(nightTex){ mat.map = nightTex; mat.needsUpdate=true; overlayMesh.visible = false; console.log('Applied night map'); }}
+
+  // small heightmap displacement (optional) - uses a local heightmap if present
+  async function loadHeight(url){ return new Promise((res,rej)=>{ const img = new Image(); img.crossOrigin='anonymous'; img.src = url; img.onload=()=>{ const c=document.createElement('canvas'); c.width=img.width; c.height=img.height; const ctx=c.getContext('2d'); ctx.drawImage(img,0,0); res({canvas:c,data:ctx.getImageData(0,0,c.width,c.height).data,width:c.width,height:c.height}); }; img.onerror=(e)=>rej(e); }); }
+  let height=null; try{ height = await loadHeight('assets/heightmap_4096x2048.png'); console.log('heightmap loaded', height.width+'x'+height.height); }catch(e){ console.log('no heightmap, skipping displacement'); }
+  // track exaggeration and original positions so reset is possible
+  let exaggeration = 0.1; document.getElementById('ex').value = exaggeration; document.getElementById('exv').textContent = exaggeration.toFixed(2)+'x';
+  const origPos = new Float32Array(geo.attributes.position.array.length); origPos.set(geo.attributes.position.array);
+  async function applyGeoidShape(){ if(!height) { console.log('No heightmap available'); return; } const pos = geo.attributes.position.array; const uv = geo.attributes.uv; const count = geo.attributes.position.count; const visualScale = 0.0003; for(let i=0;i<count;i++){ const ox = origPos[i*3], oy = origPos[i*3+1], oz = origPos[i*3+2]; const r = Math.sqrt(ox*ox+oy*oy+oz*oz); const nx=ox/r, ny=oy/r, nz=oz/r; const u = uv.getX(i); const v = 1-uv.getY(i); const fx = Math.floor(u*(height.width-1)); const fy = Math.floor(v*(height.height-1)); const ii=(fy*height.width+fx)*4; const val = height.data[ii]/255; const meters = (val*400)-200; const delta = meters * visualScale * exaggeration; const newR = r + delta; pos[i*3]=nx*newR; pos[i*3+1]=ny*newR; pos[i*3+2]=nz*newR; } geo.attributes.position.needsUpdate=true; geo.computeVertexNormals(); console.log('Geoid applied; exaggeration=',exaggeration); }
+
+  // expose simple debug handles
+  window.gMesh = mesh; window.gMaterial = mat; window.applyPBRForMode = (isNight)=>{ if(isNight) applyNight(); else applyDay(); }; window.applyGeoidShape = applyGeoidShape; window.dayTex = dayTex; window.nightTex = nightTex;
+
+  // wire additional UI controls (presets, graticule toggles, tilt, spin, reset, status)
+  const exEl = document.getElementById('ex'); const exVal = document.getElementById('exv');
+  // helper to disable/enable UI while applying heavy changes
+  function setApplying(state){
+    const disable = !!state;
+    try { if(exEl) exEl.disabled = disable; } catch(e){}
+    try { document.querySelectorAll('.preset-btn').forEach(b=>b.disabled = disable); } catch(e){}
+    try { const rb = document.getElementById('resetBtn'); if(rb) rb.disabled = disable; } catch(e){}
+    const st = document.getElementById('gp-status'); if(st) st.textContent = disable ? 'Applying…' : 'Ready';
+  }
+  let exDebounce = null;
+  exEl.addEventListener('input', e=>{
+    exaggeration = Number(e.target.value)||0;
+    exVal.textContent = exaggeration.toFixed(2)+'x';
+    if(exDebounce) clearTimeout(exDebounce);
+    exDebounce = setTimeout(async ()=>{
+      exDebounce = null;
+      try { await applyWithUi(()=>applyGeoidShape()); } catch(e){ console.error(e); }
+    }, 250);
+  });
+  // add preset buttons x1/x5/x10 (with async apply and UI disabling)
+  const presWrap = document.createElement('div'); presWrap.style.marginTop='6px'; presWrap.style.display='flex'; presWrap.style.gap='6px';
+  const b1 = document.createElement('button'); b1.textContent = 'x1';
+  const b5 = document.createElement('button'); b5.textContent = 'x5';
+  const b10 = document.createElement('button'); b10.textContent = 'x10';
+  b1.className = 'preset-btn'; b5.className = 'preset-btn'; b10.className = 'preset-btn';
+  presWrap.appendChild(b1); presWrap.appendChild(b5); presWrap.appendChild(b10);
+  document.getElementById('ui').insertBefore(presWrap, document.getElementById('ui').children[2]);
+  async function applyWithUi(fn){ const st = document.getElementById('gp-status'); setApplying(true); if(st) st.textContent = 'Applying…'; try { await fn(); if(st) st.textContent = 'Done'; } catch(e) { if(st) st.textContent = 'Error'; console.error(e); } setApplying(false); }
+  b1.addEventListener('click', ()=>{ exaggeration=1; exEl.value=1; exVal.textContent='1.00x'; applyWithUi(()=>applyGeoidShape()); });
+  b5.addEventListener('click', ()=>{ exaggeration=5; exEl.value=5; exVal.textContent='5.00x'; applyWithUi(()=>applyGeoidShape()); });
+  b10.addEventListener('click', ()=>{ exaggeration=10; exEl.value=10; exVal.textContent='10.00x'; applyWithUi(()=>applyGeoidShape()); });
+
+  // graticule toggles
+  const gWrap = document.createElement('div'); gWrap.style.marginTop='8px'; gWrap.style.display='flex'; gWrap.style.flexDirection='column';
+  const gLabel=document.createElement('label'); gLabel.style.fontSize='12px'; const cbMajor=document.createElement('input'); cbMajor.type='checkbox'; cbMajor.checked=true; cbMajor.style.marginLeft='6px'; const labMajor=document.createElement('span'); labMajor.textContent='Show graticule (major)'; gLabel.appendChild(cbMajor); gLabel.appendChild(labMajor);
+  const gLabel2=document.createElement('label'); gLabel2.style.fontSize='12px'; const cbMinor=document.createElement('input'); cbMinor.type='checkbox'; cbMinor.checked=false; cbMinor.style.marginLeft='6px'; const labMinor=document.createElement('span'); labMinor.textContent='Show graticule (minor)'; gLabel2.appendChild(cbMinor); gLabel2.appendChild(labMinor);
+  gWrap.appendChild(gLabel); gWrap.appendChild(gLabel2); document.getElementById('ui').appendChild(gWrap);
+  cbMajor.addEventListener('change', ()=>{ grMeshMajor.visible = !!cbMajor.checked; }); cbMinor.addEventListener('change', ()=>{ grMeshMinor.visible = !!cbMinor.checked; });
+
+  // axial tilt toggle
+  const tiltWrap = document.createElement('div'); tiltWrap.style.marginTop='6px'; tiltWrap.style.display='flex'; tiltWrap.style.alignItems='center'; const tiltCb=document.createElement('input'); tiltCb.type='checkbox'; tiltCb.checked=true; tiltCb.style.marginLeft='6px'; const tiltLab=document.createElement('span'); tiltLab.textContent='Axial tilt'; tiltWrap.appendChild(tiltCb); tiltWrap.appendChild(tiltLab); document.getElementById('ui').appendChild(tiltWrap);
+  const EARTH_AXIAL_TILT = THREE.MathUtils.degToRad(23.5); tiltCb.addEventListener('change', ()=>{ tiltGroup.rotation.x = tiltCb.checked ? EARTH_AXIAL_TILT : 0; }); tiltGroup.rotation.x = EARTH_AXIAL_TILT;
+
+  // spin controls (label above slider, play button + slider + value on one row)
+  const spinWrap = document.createElement('div');
+  spinWrap.style.marginTop = '8px';
+  const spinLabel = document.createElement('label'); spinLabel.textContent = 'RPM'; spinLabel.style.display='block'; spinLabel.style.fontSize='12px'; spinLabel.style.marginBottom='4px'; spinWrap.appendChild(spinLabel);
+  const spinRow = document.createElement('div'); spinRow.style.display = 'flex'; spinRow.style.alignItems = 'center'; spinRow.style.gap = '8px';
+  const spinBtn = document.createElement('button'); spinBtn.textContent = '⏸';
+  const spinRange = document.createElement('input'); spinRange.type = 'range'; spinRange.min = '0'; spinRange.max = '1.5'; spinRange.step = '0.01'; spinRange.value = '1'; spinRange.style.width = '110px';
+  const spinVal = document.createElement('span'); spinVal.style.minWidth = '48px'; spinVal.style.color = '#cfd8e3'; spinVal.textContent = '1.00';
+  spinRow.appendChild(spinBtn); spinRow.appendChild(spinRange); spinRow.appendChild(spinVal); spinWrap.appendChild(spinRow); document.getElementById('ui').appendChild(spinWrap);
+  let spinRpm = Number(spinRange.value) || 1; let spinPaused = false; spinRange.addEventListener('input', ()=>{ spinRpm = Number(spinRange.value) || 0; spinVal.textContent = spinRpm.toFixed(2); }); spinBtn.addEventListener('click', ()=>{ spinPaused = !spinPaused; spinBtn.textContent = spinPaused ? '▶' : '⏸'; });
+
+  // reset and status (make status addressable by id)
+  const resetBtn = document.createElement('button'); resetBtn.id = 'resetBtn'; resetBtn.textContent='Reset'; resetBtn.style.marginTop='8px'; document.getElementById('ui').appendChild(resetBtn);
+  const bySection = document.createElement('div'); bySection.style.display='flex'; bySection.style.alignItems='center'; bySection.style.justifyContent='flex-end'; bySection.style.marginTop='8px'; bySection.innerHTML = '<span style="margin-right:4px;font-size:12px;">by</span><img src="assets/Signet_short.png" style="height:88px;filter:brightness(1.5);margin:0;" alt="Logo">'; document.getElementById('ui').appendChild(bySection);
+  const status = document.createElement('div'); status.id = 'gp-status'; status.style.fontSize='12px'; status.style.color='#cfd8e3'; status.style.marginTop='6px'; status.textContent='Ready'; document.getElementById('ui').appendChild(status);
+  resetBtn.addEventListener('click', ()=>{ // restore original positions and rotation
+    geo.attributes.position.array.set(origPos); geo.attributes.position.needsUpdate=true; try{ geo.computeVertexNormals(); }catch(e){} spinGroup.rotation.y = 0; tiltGroup.rotation.x = EARTH_AXIAL_TILT; exaggeration = 0.1; exEl.value = exaggeration; exVal.textContent = exaggeration.toFixed(2)+'x'; const st = document.getElementById('gp-status'); if(st) st.textContent='Reset'; });
+
+  // wire UI
+  document.getElementById('daybtn').addEventListener('click', ()=>{ applyDay(); overlayMesh.visible=false; });
+  document.getElementById('nightbtn').addEventListener('click', ()=>{ applyNight(); overlayMesh.visible=false; });
+  
+    // Kebab (minimize) wiring: toggle `.small` class on #ui
+    (function wireKebab(){
+      try {
+        const kebab = document.getElementById('ui-kebab');
+        const ui = document.getElementById('ui');
+        if (!kebab || !ui) return;
+        let minimized = false;
+        kebab.addEventListener('click', ()=>{
+          minimized = !minimized;
+          ui.classList.toggle('small', minimized);
+        });
+      } catch(e) { /* noop */ }
+    })();
+
+  // animation
+  function updateSun(){ const d=new Date(); const sun = new THREE.Vector3(1,0,0); camera.updateMatrixWorld(); const vm = camera.matrixWorld.clone().invert(); const sv = sun.applyMatrix4(vm).normalize(); overlayUniforms.sunDirView.value.copy(sv); overlayUniforms.sunDirView.needsUpdate=true; }
+  let lastSpinTime = performance.now(); function animate(){ requestAnimationFrame(animate); const now = performance.now(); const dt = (now - lastSpinTime)/1000; lastSpinTime = now; if(!spinPaused){ const rps = (spinRpm||0)/60.0; const ang = rps * 2.0 * Math.PI * dt; spinGroup.rotation.y += ang; }
+    // keep star shell centered on camera and rotate it slowly
+    try { if (starGroup) { starGroup.position.copy(camera.position); starGroup.rotation.y += (starRotationSpeed || 0) * dt; } } catch(e) {}
+    controls.update(); updateSun(); renderer.render(scene,camera); }
+  animate();
+
+  window.addEventListener('resize', ()=>{ camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth,window.innerHeight); });
+})();
+</script>
+</body>
+  <style>
+    html,body{height:100%;margin:0;background:#000}
+    #c{width:100%;height:100%;display:block}
+    #ui{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.5);color:#fff;padding:8px;border-radius:6px;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;font-size:13px;z-index:99;max-width:420px}
+    /* Title row layout */
+    #ui .title-row{display:flex;align-items:center;gap:8px}
+    #ui .title-row strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+    #ui-kebab{width:26px;height:26px;display:inline-block;cursor:pointer;flex:0 0 26px;text-align:center}
+    #ui-kebab:after{content:'\22EE';font-size:18px;line-height:26px;color:#ddd}
+
+    /* Minimized (kabob) state: hide controls but keep title visible */
+    #ui.small{width:auto;padding:6px 8px;text-align:left;min-width:120px}
+    /* hide every child except the title row when minimized so dynamically appended elements are hidden too */
+    #ui.small > :not(.title-row){ display:none !important }
+    #ui.small .controls{display:none}
+    /* slightly smaller title when minimized */
+    #ui.small .title-row strong{font-size:12px}
+  </style>

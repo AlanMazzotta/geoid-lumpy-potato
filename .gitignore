@@ -1,0 +1,15 @@
+data/
+*.tif
+*.tiff
+egm2008_geoid.tif
+node_modules/
+/.env
+.DS_Store
+
+# GitHub Pages deployment - keep assets but exclude large files
+!assets/*.jpg
+!assets/*.png
+*.zip
+*.tar.gz
+temp/
+.vscode/
