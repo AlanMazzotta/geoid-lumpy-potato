@@ -1,4 +1,5 @@
 data/
+EGM2008_Interpolation_Grid/
 *.tif
 *.tiff
 egm2008_geoid.tif
