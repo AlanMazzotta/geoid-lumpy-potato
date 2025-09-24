@@ -3,7 +3,7 @@
 An interactive 3D Earth visualization showing the EGM2008 geoid with realistic displacement mapping, powered by Three.js.
 
 ## 🚀 Live Demo
-**[View Live Demo →](https://yourusername.github.io/repo-name)**
+**[View Live Demo →](https://AlanMazzotta.github.io/geoid-lumpy-potato)**
 
 ## 🌍 Features
 - **Interactive 3D Earth** with realistic geoid displacement
